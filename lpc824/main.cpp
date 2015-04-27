@@ -228,7 +228,7 @@ static void gradient_test() {
 	
 	for (uint32_t y = 0; y < 32; y++) {
 		for (uint32_t x = 0; x < 32; x++) {
-			uint32_t offset = get_offset(x+p,y+(p>>4));
+			uint32_t offset = get_offset(x+p,y+p);
 			uint32_t page = offset / page_size;
 			uint8_t *data = data_pages[d+page].data;
 			offset -= page * page_size;
@@ -297,8 +297,8 @@ int main(void) {
 	/* Set clock speed and mode */
 	LPC_SPI0->DIV = 100;
 	LPC_SPI0->DLY = 0;
-	LPC_SPI0->CFG = (SPI_CFG_MASTER & ~SPI_CFG_ENABLE);
-	LPC_SPI0->CFG |= SPI_CFG_ENABLE;
+	LPC_SPI0->CFG = ((1UL << 2) & ~(1UL << 0));
+	LPC_SPI0->CFG |= (1UL << 0);
 
 	// Enable DMA peripheral clock at the rate of the AHB clock
 	LPC_SYSCON->SYSAHBCLKCTRL |= (1 << 29);
