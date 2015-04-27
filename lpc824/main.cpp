@@ -19,7 +19,22 @@
 #define ADDR_C		26
 #define ADDR_D		27
 
-static uint8_t *display_mem = (uint8_t *)(0x10000400);
+#define member_size(type, member) sizeof(((type *)0)->member)
+
+#define PAGE_COUNT	6
+
+struct data_page {
+	uint8_t  data[1152];
+	
+	uint8_t  page;
+	uint8_t  pwm_length;
+	uint8_t  gamma;
+	uint8_t  pad[9];
+
+	uint32_t serial;
+};
+
+static data_page data_pages[PAGE_COUNT] = { 0 };
 
 static void output_line(const uint16_t *line, uint32_t pl, uint32_t pg) {
 	LPC_GPIO_PORT->MASK0 = ~((1<<CLK)|
@@ -116,28 +131,67 @@ static void output_line(const uint16_t *line, uint32_t pl, uint32_t pg) {
 }
 
 static void output_frame() {
-	static uint8_t interlace_pattern[16] = {
-			15, 13, 11, 9, 7, 5, 3, 1,
-			14, 12, 10, 8, 6, 4, 2, 0
-	};
+	volatile uint32_t pl = 32;
+	volatile uint32_t pg = 2;
+
 	static uint32_t led_blink_count = 0;
-	if ((led_blink_count++ & 0x08)) {
+	if ((led_blink_count++ & 0x080)) {
 		LPC_GPIO_PORT->SET0 = (1<<LED1);
 	} else {
 		LPC_GPIO_PORT->CLR0 = (1<<LED1);
 	}
-	const uint16_t *lines = (uint16_t *)display_mem;
-	volatile uint32_t pl = 32;
-	volatile uint32_t pg = 2;
-	for (uint32_t y = 0; y < 16; y++) {
-		LPC_GPIO_PORT->SET0 = (1<<OE); // led off
-		LPC_GPIO_PORT->MASK0 = ~((1<<ADDR_A)|
-								 (1<<ADDR_B)|
-								 (1<<ADDR_C)|
-								 (1<<ADDR_D)); // setup address mask
-		LPC_GPIO_PORT->MPIN0 = interlace_pattern[y] << ADDR_A;
-		output_line(lines, pl, pg);
-		lines += 32*3;
+
+	uint32_t page_location[3] = { 0 };	
+	uint32_t high_serial = 0;
+	for (uint32_t s = 0; s < PAGE_COUNT; s++) {
+		uint32_t ds = data_pages[s].serial;
+		if (ds > high_serial) {
+			high_serial = ds;
+			page_location[0] = 0xFFFFFFFF;
+			page_location[1] = 0xFFFFFFFF;
+			page_location[2] = 0xFFFFFFFF;
+			for (uint32_t t = 0; t < PAGE_COUNT; t++) {
+				if (data_pages[t].serial == ds) {	
+					if (data_pages[t].page < 3) {
+						page_location[data_pages[t].page] = t;
+					}
+				}
+			}
+			for (uint32_t t = 0; t < 3; t++) {
+				if (page_location[t] == 0xFFFFFFFFUL) {
+					high_serial = 0;
+				}
+			}
+		}
+	}
+	
+	if (high_serial == 0) {
+		return;
+	}
+
+	uint32_t y = 0;
+	static uint8_t screen_split[] = { 6, 6, 4 };
+	for (uint32_t s = 0; s < 3; s++) {
+		uint32_t ps = page_location[s];
+		uint32_t pl = data_pages[ps].pwm_length;
+		uint32_t pg = data_pages[ps].gamma;
+		const uint16_t *lines = (uint16_t *)data_pages[ps].data;
+		uint32_t sp = screen_split[s];
+		for (uint32_t p = 0; p < sp; p++) {
+			static uint8_t interlace_pattern[16] = {
+					15, 13, 11, 9, 7, 5, 3, 1,
+					14, 12, 10, 8, 6, 4, 2, 0
+			};
+			LPC_GPIO_PORT->SET0 = (1<<OE); // led off
+			LPC_GPIO_PORT->MASK0 = ~((1<<ADDR_A)|
+									 (1<<ADDR_B)|
+									 (1<<ADDR_C)|
+									 (1<<ADDR_D)); // setup address mask
+			LPC_GPIO_PORT->MPIN0 = interlace_pattern[y] << ADDR_A;
+			output_line(lines, pl, pg);
+			lines += 32*3;
+			y++;
+		}
 	}
 }
 
@@ -154,25 +208,64 @@ static uint32_t get_offset(uint32_t x, uint32_t y) {
 
 static void gradient_test() {
 	static uint32_t p = 0;
+	static uint32_t s = 0;	
+	static uint32_t d = 0;
+
+	uint32_t page_size =member_size(data_page,data);
+
+	data_pages[d+0].serial = s;
+	data_pages[d+0].page = 0;
+	data_pages[d+0].pwm_length = 32;
+	data_pages[d+0].gamma = 2;
+	data_pages[d+1].serial = s;
+	data_pages[d+1].page = 1;
+	data_pages[d+1].pwm_length = 32;
+	data_pages[d+1].gamma = 2;
+	data_pages[d+2].serial = s;
+	data_pages[d+2].page = 2;
+	data_pages[d+2].pwm_length = 32;
+	data_pages[d+2].gamma = 2;
+	
 	for (uint32_t y = 0; y < 32; y++) {
 		for (uint32_t x = 0; x < 32; x++) {
 			uint32_t offset = get_offset(x+p,y+(p>>4));
-			display_mem[offset+2] = (x * 32) / 32;
-			display_mem[offset+1] = (y * 32) / 32;
-			display_mem[offset+0] = ((63 - x - y)/2 * 32) / 32;
+			uint32_t page = offset / page_size;
+			uint8_t *data = data_pages[d+page].data;
+			offset -= page * page_size;
+			data[offset+2] = (x * 32) / 32;
+			data[offset+1] = (y * 32) / 32;
+			data[offset+0] = ((63 - x - y)/2 * 32) / 32;
 		}
 	}
+	d += 3;
+	d = d % PAGE_COUNT;
 	p++;
+	s++;
 }
 
+struct dma_ctrl {
+	uint32_t cfg;
+	uint32_t src_end;
+	uint32_t dst_end;
+	uint32_t link;	
+};
+
+static dma_ctrl *dma = reinterpret_cast<dma_ctrl *>(0x10001E00);
 
 int main(void) {
 
-    /* Pin Assign 8 bit Configuration */
-    /* none */
-    /* Pin Assign 1 bit Configuration */
-    /* RESET */
-    LPC_SWM->PINENABLE0 = 0xfffffeffUL;
+	NVIC_DisableIRQ( DMA_IRQn );
+	
+	/* Pin Assign 8 bit Configuration */
+	/* SPI0_SCK */
+	LPC_SWM->PINASSIGN[3] = 0x06ffffffUL;
+	/* SPI0_MOSI */
+	/* SPI0_SSEL0 */
+	LPC_SWM->PINASSIGN[4] = 0xff08ff07UL;
+
+	/* Pin Assign 1 bit Configuration */
+	/* RESET */
+	LPC_SWM->PINENABLE0 = 0xfffffeffUL;
 
     // set pins to output
 	LPC_GPIO_PORT->DIR0 |= (1 << LED0);
@@ -194,10 +287,73 @@ int main(void) {
 	LPC_GPIO_PORT->DIR0 |= (1 << ADDR_C);
 	LPC_GPIO_PORT->DIR0 |= (1 << ADDR_D);
 
+	/* Enable SPI clock */
+	LPC_SYSCON->SYSAHBCLKCTRL |= (1<<11);
+
+	/* Bring SPI out of reset */
+	LPC_SYSCON->PRESETCTRL &= ~(0x1<<0);
+	LPC_SYSCON->PRESETCTRL |= (0x1<<0);
+
+	/* Set clock speed and mode */
+	LPC_SPI0->DIV = 100;
+	LPC_SPI0->DLY = 0;
+	LPC_SPI0->CFG = (SPI_CFG_MASTER & ~SPI_CFG_ENABLE);
+	LPC_SPI0->CFG |= SPI_CFG_ENABLE;
+
+	// Enable DMA peripheral clock at the rate of the AHB clock
+	LPC_SYSCON->SYSAHBCLKCTRL |= (1 << 29);
+
+	LPC_DMA->SRAMBASE = reinterpret_cast<uint32_t>(dma); // Point DMA control to the dmaChannel1 structure 
+	LPC_DMA->CTRL = (1UL << 0); // Enable the DMA controller
+	LPC_DMA->ENABLESET0 = (1UL << 0); // Enable DMA channel 0
+
+	LPC_DMA->CFG0 = 
+		(1UL << 0) | // Peripheral request Enable
+		(1UL << 1) | // HW trigger Enable
+		(1UL << 4) | // Trigger polarity (0:Active low - falling edge) (1:Active high - falling edge)
+		(0UL << 5) | // Trigger type (0: Edge) (1: Level)
+		(0UL << 6) ; // Trigger burst mode
+
+	// Set up reload configurations
+	uint32_t channel_cfg0 = 
+		(1UL <<  0) | // Configuration valid
+		(1UL <<  1) | // Reload
+		(0UL <<  2) | // software trigger
+		(0UL <<  3) | // clear trigger
+		(0UL <<  4) | // set interrupt A
+		(0UL <<  5) | // set interrupt B
+		(1UL <<  8) | // 16bit transfer
+		(0UL << 12) | // 0x src increment
+		(1UL << 14) | // 1x dst increment
+		(((sizeof(data_page)/2)-1) << 16); // set transfer size
+
+	// Set up DMA transfer chain
+	for (uint32_t c = 0; c < 6; c++) {
+		dma[c].cfg = channel_cfg0;
+		dma[c].src_end = reinterpret_cast<uint32_t>(&LPC_SPI0->RXDAT);
+		dma[c].dst_end = reinterpret_cast<uint32_t>(&data_pages[c+1]);
+		dma[c].link = reinterpret_cast<uint32_t>(&dma[c+1]);
+	}
+
+	LPC_DMA->XFERCFG0 = channel_cfg0;
+	
+	if (((uint8_t *)&data_pages[6]) >= ((uint8_t *)dma)) {
+		for ( ;; ) {
+			static uint32_t led_blink_count = 0;
+			if ((led_blink_count++ & 0x0800)) {
+				LPC_GPIO_PORT->SET0 = (1<<LED1);
+			} else {
+				LPC_GPIO_PORT->CLR0 = (1<<LED1);
+			}
+		}
+	}
+	
+	// Start program
 	LPC_GPIO_PORT->SET0 = (1<<LED0);
 
 	uint32_t gamma = 1;
 	gradient_test();
+	LPC_GPIO_PORT->CLR0 = (1<<LED0);
 	while(1) {
 		gradient_test();
     	output_frame();

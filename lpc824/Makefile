@@ -11,7 +11,7 @@ CP = $(TRGT)objcopy
 DUMP = $(TRGT)objdump
 
 # compiler and linker settings
-CFLAGS = -mcpu=cortex-m0plus -mthumb -I./ -O3 -ggdb
+CFLAGS = -mcpu=cortex-m0plus -mthumb -I./ -O3
 CXXFLAGS = $(CFLAGS) -fno-rtti -fno-exceptions
 LDFLAGS = -Wl,--script=LPC824.ld -nostartfiles
 
@@ -24,7 +24,7 @@ upload: firmware.bin
 	./lpc21isp/lpc21isp -control -donotstart -bin $< $(TTY) 115200 0
 
 dump: firmware.elf
-	$(DUMP) -d $< > firmware.s
+	$(DUMP) -D $< > firmware.s
 
 firmware.elf: main.o gcc_startup_lpc82x.o system_LPC82x.o
 	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $^
