@@ -243,6 +243,28 @@ static void gradient_test() {
 	s++;
 }
 
+void PININT0_IRQHandler(void)
+{
+	static uint32_t led_blink_count = 0;
+	if ((led_blink_count++ & 0x01)) {
+		LPC_GPIO_PORT->SET0 = (1<<LED1);
+	} else {
+		LPC_GPIO_PORT->CLR0 = (1<<LED1);
+	}
+	LPC_PIN_INT->IST = (1UL << 0);
+}
+
+void DMA_IRQHandler(void) 
+{
+	static uint32_t led_blink_count = 0;
+	if ((led_blink_count++ & 0x01)) {
+		LPC_GPIO_PORT->SET0 = (1<<LED1);
+	} else {
+		LPC_GPIO_PORT->CLR0 = (1<<LED1);
+	}
+    LPC_DMA->INTA0 = (1UL << 6);
+}
+
 struct dma_ctrl {
 	uint32_t cfg;
 	uint32_t src_end;
@@ -287,6 +309,13 @@ int main(void) {
 	LPC_GPIO_PORT->DIR0 |= (1 << ADDR_C);
 	LPC_GPIO_PORT->DIR0 |= (1 << ADDR_D);
 
+	// Configure SYNC line
+	LPC_GPIO_PORT->DIR0 &= ~(1 << 8); // input
+	LPC_IOCON->PIO0_8 = (1UL << 3); // pull down resistor
+	LPC_SYSCON->PINTSEL0 = 8; // Pin 8 is trigger
+	LPC_PIN_INT->IENR = (1UL << 8); // Rising edge trigger
+ 	NVIC_EnableIRQ(PIN_INT0_IRQn);
+
 	/* Enable SPI clock */
 	LPC_SYSCON->SYSAHBCLKCTRL |= (1<<11);
 
@@ -299,18 +328,18 @@ int main(void) {
 	LPC_SPI0->DLY = 0;
 	LPC_SPI0->CFG = ((1UL << 2) & ~(1UL << 0));
 	LPC_SPI0->CFG |= (1UL << 0);
+	LPC_SPI0->TXCTL = (0xFUL) << 24; // 16bit wide transfer
 
 	// Enable DMA peripheral clock at the rate of the AHB clock
 	LPC_SYSCON->SYSAHBCLKCTRL |= (1 << 29);
 
 	LPC_DMA->SRAMBASE = reinterpret_cast<uint32_t>(dma); // Point DMA control to the dmaChannel1 structure 
 	LPC_DMA->CTRL = (1UL << 0); // Enable the DMA controller
-	LPC_DMA->ENABLESET0 = (1UL << 0); // Enable DMA channel 0
 
-	LPC_DMA->CFG0 = 
+	LPC_DMA->CFG6 = 
 		(1UL << 0) | // Peripheral request Enable
 		(1UL << 1) | // HW trigger Enable
-		(1UL << 4) | // Trigger polarity (0:Active low - falling edge) (1:Active high - falling edge)
+		(0UL << 4) | // Trigger polarity (0:Active low - falling edge) (1:Active high - falling edge)
 		(0UL << 5) | // Trigger type (0: Edge) (1: Level)
 		(0UL << 6) ; // Trigger burst mode
 
@@ -329,14 +358,18 @@ int main(void) {
 
 	// Set up DMA transfer chain
 	for (uint32_t c = 0; c < 6; c++) {
-		dma[c].cfg = channel_cfg0;
-		dma[c].src_end = reinterpret_cast<uint32_t>(&LPC_SPI0->RXDAT);
-		dma[c].dst_end = reinterpret_cast<uint32_t>(&data_pages[c+1]);
-		dma[c].link = reinterpret_cast<uint32_t>(&dma[c+1]);
+		dma[c+6].cfg = channel_cfg0;
+		dma[c+6].src_end = reinterpret_cast<uint32_t>(&LPC_SPI0->RXDAT);
+		dma[c+6].dst_end = reinterpret_cast<uint32_t>(&data_pages[c+1]);
+		dma[c+6].link = reinterpret_cast<uint32_t>(&dma[c+6+1]);
 	}
 
 	LPC_DMA->XFERCFG0 = channel_cfg0;
-	
+	LPC_DMA->INTENSET0 = (1UL << 6);
+    LPC_DMATRIGMUX->DMA_ITRIG_INMUX0 = 5; // PININT0
+	LPC_DMA->ENABLESET0 = (1UL << 6); // Enable DMA channel 6
+ 	NVIC_EnableIRQ(DMA_IRQn);
+ 	    	
 	if (((uint8_t *)&data_pages[6]) >= ((uint8_t *)dma)) {
 		for ( ;; ) {
 			static uint32_t led_blink_count = 0;
