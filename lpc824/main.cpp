@@ -25,12 +25,10 @@
 
 struct data_page {
 	uint8_t  data[1152];
-	
 	uint8_t  page;
 	uint8_t  pwm_length;
 	uint8_t  gamma;
 	uint8_t  pad[9];
-
 	uint32_t serial;
 };
 
@@ -135,12 +133,12 @@ static void output_frame() {
 	volatile uint32_t pg = 2;
 
 	static uint32_t led_blink_count = 0;
-	if ((led_blink_count++ & 0x080)) {
+	if ((led_blink_count++ & 0x040)) {
 		LPC_GPIO_PORT->SET0 = (1<<LED1);
 	} else {
 		LPC_GPIO_PORT->CLR0 = (1<<LED1);
 	}
-
+	
 	uint32_t page_location[3] = { 0 };	
 	uint32_t high_serial = 0;
 	for (uint32_t s = 0; s < PAGE_COUNT; s++) {
@@ -243,26 +241,24 @@ static void gradient_test() {
 	s++;
 }
 
+extern "C" void PININT0_IRQHandler(void);
 void PININT0_IRQHandler(void)
 {
-	static uint32_t led_blink_count = 0;
-	if ((led_blink_count++ & 0x01)) {
-		LPC_GPIO_PORT->SET0 = (1<<LED1);
-	} else {
-		LPC_GPIO_PORT->CLR0 = (1<<LED1);
-	}
 	LPC_PIN_INT->IST = (1UL << 0);
-}
-
-void DMA_IRQHandler(void) 
-{
-	static uint32_t led_blink_count = 0;
-	if ((led_blink_count++ & 0x01)) {
-		LPC_GPIO_PORT->SET0 = (1<<LED1);
-	} else {
-		LPC_GPIO_PORT->CLR0 = (1<<LED1);
+	static uint32_t page = 0;
+	uint16_t *data = reinterpret_cast<uint16_t *>(&data_pages[page]);
+	for (uint32_t c = 0; c < sizeof(data_page)/2; c++) {
+		while ( (LPC_SPI0->STAT & (1<<1)) == 0 );
+		LPC_SPI0->TXDATCTL = (15UL<<24) | 0xFFFF;
+		while ( (LPC_SPI0->STAT & (1<<0)) == 0 );	
+		uint32_t d = LPC_SPI0->RXDAT & 0xFFFF; 
+		data[c] = d;
 	}
-    LPC_DMA->INTA0 = (1UL << 6);
+	data_pages[page].pwm_length = 32;
+	data_pages[page].gamma = 2;
+	page++;
+	page %= 6;
+	
 }
 
 struct dma_ctrl {
@@ -310,12 +306,20 @@ int main(void) {
 	LPC_GPIO_PORT->DIR0 |= (1 << ADDR_D);
 
 	// Configure SYNC line
-	LPC_GPIO_PORT->DIR0 &= ~(1 << 8); // input
-	LPC_IOCON->PIO0_8 = (1UL << 3); // pull down resistor
-	LPC_SYSCON->PINTSEL0 = 8; // Pin 8 is trigger
-	LPC_PIN_INT->IENR = (1UL << 8); // Rising edge trigger
- 	NVIC_EnableIRQ(PIN_INT0_IRQn);
+	
+	/* Enable GPIO interrupt */
+	LPC_SYSCON->SYSAHBCLKCTRL |= (1<<6); 
 
+	// Configure GPIO9 IRQ trigger 	
+	LPC_GPIO_PORT->DIR0 &= ~(1 << 9); // input
+	LPC_IOCON->PIO0_9 = (1UL << 3); // pull down resistor
+	LPC_SYSCON->PINTSEL0 = 9; // Pin 9 is trigger
+	LPC_PIN_INT->ISEL &= ~(1UL << 0); // edge sensitive
+	LPC_PIN_INT->SIENR = (1UL << 0); // Rising edge trigger 
+	LPC_PIN_INT->CIENF = (1UL << 0); // Falling edge trigger
+
+	NVIC_EnableIRQ(PIN_INT0_IRQn);
+	
 	/* Enable SPI clock */
 	LPC_SYSCON->SYSAHBCLKCTRL |= (1<<11);
 
@@ -324,13 +328,11 @@ int main(void) {
 	LPC_SYSCON->PRESETCTRL |= (0x1<<0);
 
 	/* Set clock speed and mode */
-	LPC_SPI0->DIV = 100;
+	LPC_SPI0->DIV = 1;
 	LPC_SPI0->DLY = 0;
-	LPC_SPI0->CFG = ((1UL << 2) & ~(1UL << 0));
-	LPC_SPI0->CFG |= (1UL << 0);
-	LPC_SPI0->TXCTL = (0xFUL) << 24; // 16bit wide transfer
+	LPC_SPI0->CFG = (1UL << 0);
 
-	// Enable DMA peripheral clock at the rate of the AHB clock
+	// Enable DMA peripheral
 	LPC_SYSCON->SYSAHBCLKCTRL |= (1 << 29);
 
 	LPC_DMA->SRAMBASE = reinterpret_cast<uint32_t>(dma); // Point DMA control to the dmaChannel1 structure 
@@ -366,31 +368,16 @@ int main(void) {
 
 	LPC_DMA->XFERCFG0 = channel_cfg0;
 	LPC_DMA->INTENSET0 = (1UL << 6);
-    LPC_DMATRIGMUX->DMA_ITRIG_INMUX0 = 5; // PININT0
 	LPC_DMA->ENABLESET0 = (1UL << 6); // Enable DMA channel 6
- 	NVIC_EnableIRQ(DMA_IRQn);
- 	    	
-	if (((uint8_t *)&data_pages[6]) >= ((uint8_t *)dma)) {
-		for ( ;; ) {
-			static uint32_t led_blink_count = 0;
-			if ((led_blink_count++ & 0x0800)) {
-				LPC_GPIO_PORT->SET0 = (1<<LED1);
-			} else {
-				LPC_GPIO_PORT->CLR0 = (1<<LED1);
-			}
-		}
-	}
-	
+ 
 	// Start program
-	LPC_GPIO_PORT->SET0 = (1<<LED0);
 
-	uint32_t gamma = 1;
+	// Init with defaults
 	gradient_test();
-	LPC_GPIO_PORT->CLR0 = (1<<LED0);
+	gradient_test();	
+
 	while(1) {
-		gradient_test();
     	output_frame();
-    	gamma += 1;
     }
 
     return 0;
